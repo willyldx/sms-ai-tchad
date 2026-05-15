@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -9,6 +9,10 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY main.py /app/main.py
+
+# Non-root user for security
+RUN adduser --disabled-password --no-create-home appuser
+USER appuser
 
 EXPOSE 8000
 

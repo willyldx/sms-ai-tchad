@@ -9,8 +9,17 @@ COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
 COPY . /var/www/html
 
-RUN if [ -f composer.json ]; then composer install --no-dev --optimize-autoloader --no-interaction; fi
+RUN composer install --no-dev --optimize-autoloader --no-interaction
+
+# Ensure all files are owned by www-data
+RUN chown -R www-data:www-data /var/www/html \
+    && chmod -R 755 /var/www/html \
+    && chmod -R 775 storage bootstrap/cache
+
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 EXPOSE 9000
 
+ENTRYPOINT ["entrypoint.sh"]
 CMD ["php-fpm"]

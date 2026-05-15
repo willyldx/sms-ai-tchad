@@ -16,16 +16,24 @@ class SmsController extends Controller
 {
     /**
      * Gère les SMS entrants depuis l'application Android Gateway.
+     *
+     * Flux :
+     * 1. Vérification du webhook secret
+     * 2. Validation du payload (from, message)
+     * 3. Déduplication + contrôle quota (transaction DB avec verrou)
+     * 4. Appel au microservice IA (FastAPI/Gemini)
+     * 5. Retour de la réponse à la gateway Android
      */
     public function handleIncomingSms(Request $request): JsonResponse
     {
-        if (app()->environment('production') && !env('SMS_WEBHOOK_SECRET')) {
-            Log::critical('SMS webhook secret is missing in production environment.');
+        // ── 1. Vérification du secret webhook ──────────────────────────
+        $configuredSecret = config('sms.webhook_secret');
 
+        if (app()->environment('production') && !$configuredSecret) {
+            Log::critical('SMS webhook secret is missing in production environment.');
             return response()->json(['error' => 'Service indisponible'], 503);
         }
 
-        $configuredSecret = env('SMS_WEBHOOK_SECRET');
         if ($configuredSecret) {
             $receivedSecret = $request->header('X-SMS-Webhook-Secret');
             if (!$receivedSecret || !hash_equals($configuredSecret, $receivedSecret)) {
@@ -33,23 +41,37 @@ class SmsController extends Controller
             }
         }
 
-        $validator = Validator::make($request->all(), [
-            'from' => ['required', 'string', 'max:40'],
-            'message' => ['required', 'string', 'max:1000'],
+        // ── 2. Validation du payload ───────────────────────────────────
+        // 1. Logging pour debug (visible dans docker logs)
+        \Illuminate\Support\Facades\Log::info('SMS Webhook Received', [
+            'payload' => $request->all(),
+            'headers' => $request->headers->all()
         ]);
 
-        if ($validator->fails()) {
-            return response()->json([
-                'error' => 'Validation échouée',
-                'details' => $validator->errors(),
-            ], 422);
+        // 2. Nettoyage et validation souple
+        $rawFrom = $request->input('from', '');
+        // On ne garde que les chiffres et le +
+        $cleanFrom = preg_replace('/[^0-9+]/', '', $rawFrom);
+
+        // On réinjecte le numéro nettoyé pour la validation
+        $request->merge(['from' => $cleanFrom]);
+
+        try {
+            $validated = $request->validate([
+                'from' => 'nullable|string', // On laisse tout passer pour voir ce qui arrive
+                'message' => 'nullable|string',
+            ]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return response()->json(['error' => 'Validation failed', 'details' => $e->errors(), 'raw' => $request->all()], 422);
         }
 
-        $validated = $validator->validated();
+        // 3. Log du contenu brut pour comprendre
+        \Illuminate\Support\Facades\Log::info('RAW REQUEST DATA', $request->all());
 
         $phone = $this->normalizePhoneNumber($validated['from']);
         if (!$phone) {
-            return response()->json(['error' => 'Numéro invalide'], 422);
+            // Si la normalisation échoue, on garde quand même le numéro brut nettoyé au lieu de bloquer
+            $phone = $cleanFrom;
         }
 
         $message = trim($validated['message']);
@@ -57,11 +79,12 @@ class SmsController extends Controller
             return response()->json(['error' => 'Message vide'], 422);
         }
 
+        // ── 3. Déduplication + quota (transaction avec verrou) ─────────
         $today = Carbon::today()->toDateString();
         $now = Carbon::now();
-        $dailyLimit = (int) env('SMS_DAILY_LIMIT', 3);
-        $maxSmsLength = (int) env('MAX_SMS_RESPONSE_LENGTH', 150);
-        $dedupWindowSeconds = (int) env('SMS_DEDUP_WINDOW_SECONDS', 120);
+        $dailyLimit = config('sms.daily_limit');
+        $maxSmsLength = config('sms.max_response_length');
+        $dedupWindowSeconds = config('sms.dedup_window_seconds');
         $messageFingerprint = hash('sha256', mb_strtolower($message));
         $quotaReserved = false;
         $userId = null;
@@ -76,32 +99,33 @@ class SmsController extends Controller
                 $now,
                 $dailyLimit
             ) {
-                $user = User::where('phone_number', $phone)->lockForUpdate()->first();
+                // INSERT IGNORE pour créer l'utilisateur sans race condition.
+                // Si le numéro existe déjà, l'insert est ignoré silencieusement.
+                DB::table('users')->insertOrIgnore([
+                    'phone_number' => $phone,
+                    'daily_requests_count' => 0,
+                    'daily_requests_date' => $today,
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ]);
 
-                if (!$user) {
-                    $user = User::firstOrCreate([
-                        'phone_number' => $phone,
-                    ], [
-                        'daily_requests_count' => 0,
-                        'daily_requests_date' => $today,
-                    ]);
-                    $user = User::whereKey($user->id)->lockForUpdate()->first();
-                }
+                // Maintenant on verrouille la ligne (elle existe forcément)
+                $user = User::where('phone_number', $phone)->lockForUpdate()->firstOrFail();
 
-                if ($user->daily_requests_date !== $today) {
+                // Reset quotidien si la date a changé
+                if ($user->daily_requests_date?->toDateString() !== $today) {
                     $user->daily_requests_count = 0;
                     $user->daily_requests_date = $today;
                 }
 
+                // Détection de doublon (même SMS dans la fenêtre de dédup)
                 $duplicateWindowStart = $now->copy()->subSeconds($dedupWindowSeconds);
                 if (
                     $user->last_sms_fingerprint
                     && $user->last_sms_fingerprint === $messageFingerprint
                     && $user->last_sms_received_at
-                    && Carbon::parse($user->last_sms_received_at)->greaterThanOrEqualTo($duplicateWindowStart)
+                    && $user->last_sms_received_at->greaterThanOrEqualTo($duplicateWindowStart)
                 ) {
-                    $user->save();
-
                     return [
                         'status' => 'duplicate',
                         'reply' => $user->last_sms_reply ?: 'Requête déjà traitée récemment.',
@@ -109,9 +133,8 @@ class SmsController extends Controller
                     ];
                 }
 
+                // Contrôle du quota journalier
                 if ($user->daily_requests_count >= $dailyLimit) {
-                    $user->save();
-
                     return [
                         'status' => 'quota',
                         'reply' => 'Quota quotidien atteint. Réessayez demain.',
@@ -119,6 +142,7 @@ class SmsController extends Controller
                     ];
                 }
 
+                // Réservation du quota
                 $user->daily_requests_count += 1;
                 $user->last_sms_fingerprint = $messageFingerprint;
                 $user->last_sms_reply = null;
@@ -131,10 +155,8 @@ class SmsController extends Controller
                 ];
             });
 
-            if (($lockResult['status'] ?? null) === 'duplicate' || ($lockResult['status'] ?? null) === 'quota') {
-                return response()->json([
-                    'reply' => $lockResult['reply'],
-                ]);
+            if (in_array($lockResult['status'] ?? null, ['duplicate', 'quota'])) {
+                return response()->json(['reply' => $lockResult['reply']]);
             }
 
             $quotaReserved = ($lockResult['status'] ?? null) === 'reserved';
@@ -150,11 +172,13 @@ class SmsController extends Controller
             ], 503);
         }
 
+        // ── 4. Appel au microservice IA ────────────────────────────────
         try {
-            $pythonServiceUrl = env('PYTHON_AI_SERVICE_URL', 'http://localhost:8000/ask');
-            $timeoutSeconds = (int) env('AI_HTTP_TIMEOUT_SECONDS', 20);
+            $pythonServiceUrl = config('sms.ai_service_url');
+            $timeoutSeconds = config('sms.ai_timeout_seconds');
             $requestId = (string) Str::uuid();
-            $internalToken = env('AI_INTERNAL_TOKEN');
+            $internalToken = config('sms.ai_internal_token');
+
             $httpClient = Http::retry(2, 300)
                 ->timeout($timeoutSeconds)
                 ->acceptJson()
@@ -167,11 +191,10 @@ class SmsController extends Controller
                     'X-AI-Internal-Token' => $internalToken,
                 ]);
             }
-            
-            $response = $httpClient
-                ->post($pythonServiceUrl, [
-                    'question' => $message,
-                ]);
+
+            $response = $httpClient->post($pythonServiceUrl, [
+                'question' => $message,
+            ]);
 
             if ($response->successful() && is_string($response->json('answer'))) {
                 $aiAnswer = trim($response->json('answer'));
@@ -179,9 +202,9 @@ class SmsController extends Controller
                     throw new \RuntimeException('Réponse IA vide.');
                 }
 
+                // Troncature intelligente (coupe au dernier espace, jamais en plein mot)
                 if (mb_strlen($aiAnswer) > $maxSmsLength) {
-                    $safeLength = max(4, $maxSmsLength);
-                    $aiAnswer = mb_substr($aiAnswer, 0, $safeLength - 3) . '...';
+                    $aiAnswer = $this->truncateSmart($aiAnswer, $maxSmsLength);
                 }
 
                 if ($userId) {
@@ -192,9 +215,7 @@ class SmsController extends Controller
                     ]);
                 }
 
-                return response()->json([
-                    'reply' => $aiAnswer
-                ]);
+                return response()->json(['reply' => $aiAnswer]);
             }
 
             throw new \RuntimeException('Réponse IA invalide ou indisponible.');
@@ -202,11 +223,12 @@ class SmsController extends Controller
         } catch (\Exception $e) {
             Log::error('Erreur SMS AI', [
                 'error' => $e->getMessage(),
-                'phone_hash' => $phoneHash ?? null,
+                'phone_hash' => $phoneHash,
                 'message_length' => mb_strlen($message),
                 'request_id' => $requestId ?? null,
             ]);
 
+            // Rollback du quota si l'IA a planté
             if ($quotaReserved && $userId) {
                 User::whereKey($userId)
                     ->where('daily_requests_count', '>', 0)
@@ -219,13 +241,34 @@ class SmsController extends Controller
                         'last_sms_received_at' => null,
                     ]);
             }
-            
+
             return response()->json([
-                'reply' => "Désolé, le service est temporairement indisponible."
+                'reply' => 'Désolé, le service est temporairement indisponible.',
             ]);
         }
     }
 
+    /**
+     * Tronque un texte au dernier espace avant la limite max,
+     * pour ne jamais couper un mot en plein milieu.
+     */
+    private function truncateSmart(string $text, int $maxLength): string
+    {
+        $safeLength = max(4, $maxLength);
+        $truncated = mb_substr($text, 0, $safeLength - 3);
+
+        // Chercher le dernier espace pour ne pas couper un mot
+        $lastSpace = mb_strrpos($truncated, ' ');
+        if ($lastSpace !== false && $lastSpace > $safeLength / 2) {
+            $truncated = mb_substr($truncated, 0, $lastSpace);
+        }
+
+        return $truncated . '...';
+    }
+
+    /**
+     * Normalise un numéro de téléphone en gardant le format E.164 simplifié.
+     */
     private function normalizePhoneNumber(string $rawPhone): ?string
     {
         $trimmed = trim($rawPhone);

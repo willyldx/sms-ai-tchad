@@ -1,0 +1,35 @@
+# Environment
+.env
+.env.backup
+.env.production
+
+# Dependencies
+/backend/vendor/
+/ai-service/__pycache__/
+/ai-service/*.pyc
+
+# Laravel
+/backend/storage/*.key
+/backend/bootstrap/cache/config.php
+/backend/bootstrap/cache/routes-v7.php
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Backups
+/backups/
+
+# Docker
+docker-compose.override.yml
+
+# Logs
+*.log
