@@ -6,8 +6,10 @@ services:
         condition: service_started
     ports:
       - "80:80"
+      - "443:443"
     volumes:
       - ./infra/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./backend/public:/var/www/html/public:ro
       - letsencrypt:/etc/letsencrypt
       - certbot_www:/var/www/certbot
     restart: unless-stopped
@@ -27,6 +29,8 @@ services:
       db:
         condition: service_healthy
     restart: unless-stopped
+    volumes:
+      - ./backend:/var/www/html
     healthcheck:
       test: ["CMD-SHELL", "kill -s 0 1 && test -f /var/www/html/vendor/autoload.php"]
       interval: 30s

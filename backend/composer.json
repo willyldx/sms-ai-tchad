@@ -4,6 +4,7 @@
     "description": "SMS AI Tchad — Backend Laravel",
     "require": {
         "php": "^8.2",
+        "filament/filament": "^3.2",
         "laravel/framework": "^11.0",
         "guzzlehttp/guzzle": "^7.8"
     },

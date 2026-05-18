@@ -48,8 +48,15 @@ AI_INTERNAL_TOKEN = os.getenv("AI_INTERNAL_TOKEN")
 app = FastAPI(title="SMS AI Tchad — AI Service (NVIDIA)")
 
 
+from typing import List, Optional
+
+class Message(BaseModel):
+    role: str
+    content: str
+
 class QuestionRequest(BaseModel):
-    question: str
+    question: Optional[str] = None
+    messages: Optional[List[Message]] = None
 
 
 class AnswerResponse(BaseModel):
@@ -81,11 +88,24 @@ async def health() -> HealthResponse:
 @app.post("/ask", response_model=AnswerResponse)
 async def ask_ai(payload: QuestionRequest, request: Request):
     """
-    Endpoint principal : reçoit une question, interroge NVIDIA NIM (async)
+    Endpoint principal : reçoit une question ou un historique, interroge NVIDIA NIM (async)
     et retourne une réponse ultra-courte adaptée au SMS.
     """
-    if not payload.question.strip():
-        raise HTTPException(status_code=400, detail="La question ne peut pas être vide.")
+    # Préparation des messages pour NVIDIA
+    if payload.messages:
+        # On utilise l'historique fourni, mais on s'assure que le premier message est le system prompt
+        final_messages = [{"role": "system", "content": SYSTEM_INSTRUCTION}]
+        # On filtre pour ne pas doubler le system prompt si déjà présent
+        for msg in payload.messages:
+            if msg.role != "system":
+                final_messages.append({"role": msg.role, "content": msg.content})
+    elif payload.question and payload.question.strip():
+        final_messages = [
+            {"role": "system", "content": SYSTEM_INSTRUCTION},
+            {"role": "user", "content": payload.question}
+        ]
+    else:
+        raise HTTPException(status_code=400, detail="Veuillez fournir une question ou un historique.")
 
     # Vérification du token inter-services
     if AI_INTERNAL_TOKEN:
@@ -97,10 +117,7 @@ async def ask_ai(payload: QuestionRequest, request: Request):
         # Appel asynchrone à NVIDIA NIM
         completion = await client.chat.completions.create(
             model=AI_MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_INSTRUCTION},
-                {"role": "user", "content": payload.question}
-            ],
+            messages=final_messages,
             max_tokens=100,
             temperature=0.5,
             top_p=1,

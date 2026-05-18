@@ -9,23 +9,42 @@ use Filament\Forms\Form;
 use Filament\Resources\Resource;
 use Filament\Tables;
 use Filament\Tables\Table;
+use Illuminate\Support\Facades\Hash;
 
 class UserResource extends Resource
 {
     protected static ?string $model = User::class;
 
     protected static ?string $navigationIcon = 'heroicon-o-users';
-    
+
     protected static ?string $navigationLabel = 'Utilisateurs SMS';
 
     public static function form(Form $form): Form
     {
         return $form
             ->schema([
+                Forms\Components\TextInput::make('name')
+                    ->label('Nom')
+                    ->maxLength(255),
+                Forms\Components\TextInput::make('email')
+                    ->email()
+                    ->maxLength(255)
+                    ->unique(ignoreRecord: true),
+                Forms\Components\TextInput::make('password')
+                    ->label('Mot de passe')
+                    ->password()
+                    ->revealable()
+                    ->dehydrateStateUsing(fn (?string $state): ?string => filled($state) ? Hash::make($state) : null)
+                    ->dehydrated(fn (?string $state): bool => filled($state))
+                    ->required(fn (string $operation): bool => $operation === 'create'),
+                Forms\Components\Toggle::make('is_admin')
+                    ->label('Accès admin')
+                    ->default(false),
                 Forms\Components\TextInput::make('phone_number')
                     ->tel()
-                    ->required()
-                    ->maxLength(255),
+                    ->label('Numéro de téléphone')
+                    ->maxLength(255)
+                    ->unique(ignoreRecord: true),
                 Forms\Components\TextInput::make('daily_requests_count')
                     ->numeric()
                     ->default(0),
@@ -44,13 +63,29 @@ class UserResource extends Resource
             ->columns([
                 Tables\Columns\TextColumn::make('id')
                     ->sortable(),
-                    
+
+                Tables\Columns\IconColumn::make('is_admin')
+                    ->boolean()
+                    ->label('Admin')
+                    ->sortable(),
+
+                Tables\Columns\TextColumn::make('name')
+                    ->label('Nom')
+                    ->searchable()
+                    ->sortable(),
+
+                Tables\Columns\TextColumn::make('email')
+                    ->label('Email')
+                    ->searchable()
+                    ->copyable()
+                    ->sortable(),
+
                 Tables\Columns\TextColumn::make('phone_number')
                     ->label('Numéro de téléphone')
                     ->searchable()
                     ->copyable()
                     ->sortable(),
-                    
+
                 Tables\Columns\TextColumn::make('daily_requests_count')
                     ->label('Requêtes (Jour)')
                     ->badge()
@@ -70,7 +105,7 @@ class UserResource extends Resource
                     ->label('Dernier SMS')
                     ->dateTime('d/m/Y H:i')
                     ->sortable(),
-                    
+
                 Tables\Columns\TextColumn::make('created_at')
                     ->label('Inscrit le')
                     ->dateTime('d/m/Y H:i')

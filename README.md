@@ -15,7 +15,7 @@ Assistant IA accessible par SMS au Tchad. Un téléphone Android sert de gateway
        ▼                                                     ┌─────▼─────┐
 ┌──────────────┐                                             │  FastAPI  │
 │  Utilisateur │                                             │ AI Service│
-│  Tchadien    │                                             │ (Gemini)  │
+│  Tchadien    │                                             │ (NVIDIA)  │
 └──────────────┘                                             └───────────┘
                                                                     │
                                                              ┌──────▼──────┐
@@ -30,7 +30,7 @@ Assistant IA accessible par SMS au Tchad. Un téléphone Android sert de gateway
 |---------|------|
 | `nginx` | Reverse proxy, rate limiting, TLS |
 | `backend` | API Laravel — webhook SMS, quota journalier, déduplication |
-| `ai-service` | Microservice FastAPI — interroge Gemini, retourne une réponse ≤150 car. |
+| `ai-service` | Microservice FastAPI — interroge NVIDIA NIM via l'API compatible OpenAI, retourne une réponse ≤150 car. |
 | `db` | MariaDB — stocke les utilisateurs SMS et leur quota |
 | `certbot` | Certificats Let's Encrypt (profil `ops`) |
 
@@ -67,9 +67,12 @@ cp ai-service/.env.example ai-service/.env
 - `SMS_WEBHOOK_SECRET` → secret fort et unique (partagé avec l'app Android)
 - `AI_INTERNAL_TOKEN` → doit correspondre à `ai-service/.env`
 - `DB_PASSWORD` → doit correspondre à `.env` racine
+- `ADMIN_EMAIL` et `ADMIN_PASSWORD` → compte admin créé automatiquement au démarrage
 
 **`ai-service/.env`** :
-- `GEMINI_API_KEY` → ta clé API Google AI
+- `NVIDIA_API_KEY` → ta clé API NVIDIA NIM
+- `NVIDIA_BASE_URL` → URL de l'API NVIDIA compatible OpenAI
+- `AI_MODEL_NAME` → modèle utilisé par le service IA
 - `AI_INTERNAL_TOKEN` → même valeur que dans `backend/.env`
 
 **`.env` (racine)** :
@@ -86,6 +89,21 @@ L'entrypoint du backend exécute automatiquement :
 - `composer install` (si nécessaire)
 - `php artisan config:cache` (en production)
 - `php artisan migrate --force`
+- `php artisan db:seed --class=AdminUserSeeder --force` si `ADMIN_EMAIL` et `ADMIN_PASSWORD` sont renseignés
+
+Le dashboard admin Filament est disponible sur :
+
+```text
+http://<IP_VPS>/admin
+```
+
+Sur le VPS, le premier `composer install` dans le conteneur créera `backend/composer.lock` si le fichier n'existe pas encore. Vérifie ensuite :
+
+```bash
+ls -l backend/composer.lock
+```
+
+Commit ensuite `backend/composer.lock` dans le dépôt pour rendre les prochains déploiements reproductibles.
 
 ### 4. Vérifier que tout fonctionne
 
@@ -168,5 +186,5 @@ Renouvellement (à planifier en cron hebdomadaire) :
 - La déduplication ignore les SMS identiques dans une fenêtre de `SMS_DEDUP_WINDOW_SECONDS`
 - Si l'IA plante, le quota est remboursé automatiquement
 - Les réponses sont tronquées intelligemment au dernier espace (jamais en plein mot)
-- Le service IA utilise des appels asynchrones à Gemini (ne bloque pas l'event loop)
+- Le service IA utilise des appels asynchrones à NVIDIA NIM (ne bloque pas l'event loop)
 - Rate limiting Nginx : 5 req/s par IP sur le webhook SMS
